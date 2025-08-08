@@ -1,0 +1,70 @@
+
+================================================================================
+EXECUTIVE CAPABILITY ANALYSIS REPORT
+Generated: August 04, 2025 at 04:18 PM
+Analysis Mode: PROD
+Total Requirements Analyzed: 392
+================================================================================
+
+
+# EXECUTIVE CAPABILITY ANALYSIS SUMMARY
+
+## OVERVIEW
+- **Total Requirements Analyzed**: 392
+- **Average Confidence Score**: 0.59
+- **High Confidence (≥0.7)**: 11 (2.8%)
+- **Medium Confidence (0.4-0.7)**: 365 (93.1%)
+- **Low Confidence (<0.4)**: 16 (4.1%)
+
+## KEY FINDINGS
+
+### Strengths
+- Strong capability demonstrated in 11 requirements
+- Comprehensive past performance evidence available
+- Detailed supporting documentation for high-confidence areas
+
+### Areas for Attention
+- 16 requirements need additional capability development
+- Focus on improving evidence collection for medium-confidence areas
+- Consider strategic partnerships for low-confidence requirements
+
+## RECOMMENDATIONS
+
+1. **Immediate Actions**:
+   - Prioritize high-confidence requirements in proposals
+   - Develop detailed case studies for medium-confidence areas
+   - Create capability development plans for low-confidence requirements
+
+2. **Strategic Planning**:
+   - Leverage strong past performance in competitive positioning
+   - Invest in capability building for identified gaps
+   - Consider teaming arrangements for complementary capabilities
+
+3. **Risk Mitigation**:
+   - Document all supporting evidence thoroughly
+   - Prepare detailed responses for low-confidence areas
+   - Develop contingency plans for critical requirements
+
+## DETAILED ANALYSIS
+
+The analysis reviewed 392 requirements against past performance documentation. 
+The average confidence score of 0.59 indicates moderate capability alignment with some areas needing attention.
+
+
+### TOP 5 HIGHEST CONFIDENCE REQUIREMENTS
+1. **Confidence: 0.70** - Examples include, but are not limited to, the following:
+2. **Confidence: 0.70** - Examples include, but are not limited to, the following:
+3. **Confidence: 0.70** - Examples include, but are not limited to, the following:
+4. **Confidence: 0.70** - Examples include, but are not limited to, the following:
+5. **Confidence: 0.70** - Examples include, but are not limited to, the following:
+
+### TOP 5 LOWEST CONFIDENCE REQUIREMENTS
+1. **Confidence: 0.30** - When providing installation, configuration or integration services for ICT, the Contractor shall not...
+2. **Confidence: 0.30** - The Contractor shall The Contractor shall provide the Trusted Tester Certification IDs to DHS upon r...
+3. **Confidence: 0.30** - Information on the DHS Trusted Tester for Web Methodology Version 5.0, related test tools, test repo...
+4. **Confidence: 0.30** - The Contractor shall Documentation of core functions that cannot be accessed by persons with disabil...
+5. **Confidence: 0.20** - The Contractor shall have and maintain a Top Secret Facility Security Clearance granted by the Defen...
+
+
+---
+*Report generated automatically from RAG-based capability analysis*
