@@ -11,6 +11,7 @@ import argparse
 import logging
 from typing import List, Dict, Any, Optional
 import pandas as pd
+import numpy as np
 import openpyxl
 from openpyxl.styles import PatternFill, Font
 from openpyxl.utils.dataframe import dataframe_to_rows
@@ -45,10 +46,11 @@ def load_requirements():
             logger.error("Column 'Requirements' not found in Excel file!")
             return None
         
-        # If Rating column doesn't exist, add it with empty values
+        # If Rating column doesn't exist, add it as a numeric column (for confidence scores)
         if "Rating" not in df.columns:
             logger.info("'Rating' column not found in Excel file. Adding empty ratings.")
-            df["Rating"] = ""
+            # Initialize as float with NaN so we can safely assign numeric confidence scores later
+            df["Rating"] = np.nan
         
         # Check which cells are bold in the Requirements column
         workbook = openpyxl.load_workbook(EXCEL_PATH)
@@ -183,6 +185,8 @@ def save_results_to_excel(result_df: pd.DataFrame, template_path: str, output_pa
         # Write data to the sheet, applying styles
         for r_idx, row in enumerate(dataframe_to_rows(df_to_write, index=False, header=True), start_row):
             is_title_row = False
+            original_df_idx = None
+
             # Check if the current row is a title row (after the header)
             if r_idx > start_row:
                 try:
@@ -193,32 +197,39 @@ def save_results_to_excel(result_df: pd.DataFrame, template_path: str, output_pa
                     if original_series.get('is_bold', False) or title_pattern.match(requirement_text):
                         is_title_row = True
                 except (IndexError, KeyError):
-                    pass
-
+                    original_df_idx = None
+            
             # Find the index of the 'Rating' column to apply specific styling
             try:
                 rating_df_idx = df_to_write.columns.get_loc('Rating') + 1
             except KeyError:
                 rating_df_idx = -1
-
+            
             for c_idx, value in enumerate(row, 1):
                 cell = sheet.cell(row=r_idx, column=c_idx, value=value)
                 
                 if is_title_row:
                     cell.fill = gray_fill
                     cell.font = bold_font
-                elif c_idx == rating_df_idx:
-                    # Apply confidence score styling only if it's not a title row
+                elif c_idx == rating_df_idx and original_df_idx is not None:
+                    # Apply semantic rating labels and color based on numeric confidence
                     try:
-                        confidence = float(value)
+                        raw_conf = result_df.iloc[original_df_idx].get('Rating', None)
+                        confidence = float(raw_conf) if raw_conf is not None else None
+                    except (ValueError, TypeError):
+                        confidence = None
+
+                    if confidence is not None:
                         if confidence > 0.7:
+                            label = "Strong Capabilities"
                             cell.fill = green_fill
                         elif confidence >= 0.4:
+                            label = "Some Capabilities"
                             cell.fill = yellow_fill
                         else:
+                            label = "No Capabilities"
                             cell.fill = red_fill
-                    except (ValueError, TypeError):
-                        pass # Not a numeric confidence score, probably the header
+                        cell.value = label
 
         # Save the workbook
         workbook.save(output_path)
@@ -230,54 +241,6 @@ def save_results_to_excel(result_df: pd.DataFrame, template_path: str, output_pa
         result_df.to_excel(output_path, index=False, engine="openpyxl")
         logger.info(f"Fallback: Saved results to {output_path} without styling")
 
-def generate_capability_report(analyzer: RAGCapabilityAnalyzer, results: List[Dict[str, Any]], output_path: str):
-    """
-    Generates a comprehensive executive capability report using an LLM.
-    Creates a professional one-page document for stakeholder decision-making.
-    """
-    logger.info("Generating comprehensive executive capability report...")
-    
-    # Generate timestamp for the report
-    from datetime import datetime
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    
-    # Create a more professional filename
-    base_dir = os.path.dirname(output_path)
-    if MODE == "test":
-        report_filename = f"EXECUTIVE_CAPABILITY_REPORT_TEST_{timestamp}.txt"
-    else:
-        report_filename = f"EXECUTIVE_CAPABILITY_REPORT_{timestamp}.txt"
-    
-    report_path = os.path.join(base_dir, report_filename)
-    
-    # Generate the comprehensive report
-    report_content = analyzer.generate_summary_report(results)
-    
-    # Add header information
-    header = f"""
-{'='*80}
-EXECUTIVE CAPABILITY ANALYSIS REPORT
-Generated: {datetime.now().strftime("%B %d, %Y at %I:%M %p")}
-Analysis Mode: {MODE.upper()}
-Total Requirements Analyzed: {len([r for r in results if r.get('confidence_score') is not None])}
-{'='*80}
-
-"""
-    
-    full_report = header + report_content
-    
-    # Save the report
-    with open(report_path, "w", encoding="utf-8") as f:
-        f.write(full_report)
-    
-    logger.info(f"Executive capability report saved to {report_path}")
-    
-    # Also save a copy with the original filename for compatibility
-    with open(output_path, "w", encoding="utf-8") as f:
-        f.write(full_report)
-    
-    return report_path
-
 def main():
     """Main function to run the RAG-based capability analysis."""
     logger.info(f"Running RAG-based capability analysis in {MODE.upper()} mode")
@@ -288,11 +251,21 @@ def main():
         logger.error(f"Please create an Excel file with a 'Requirements' column and save it as 'requirements_matrix.xlsx' in the outgoing directory")
         return
     
-    # Check if documents directory has any PDFs
-    pdf_count = sum(1 for f in os.listdir(Config.DOCUMENTS_DIR) if f.lower().endswith('.pdf')) if os.path.exists(Config.DOCUMENTS_DIR) else 0
-    if pdf_count == 0:
-        logger.warning(f"No PDF documents found in {Config.DOCUMENTS_DIR}")
-        logger.warning(f"Please add PDF documents to be analyzed to this directory")
+    # Check if documents directory has any PDFs or DOCX files (past performance corpus)
+    pdf_root = Config.PP_SOURCE_DIR
+    pdf_count = 0
+    docx_count = 0
+    if os.path.exists(pdf_root):
+        for root, _, files in os.walk(pdf_root):
+            for f in files:
+                name = f.lower()
+                if name.endswith(".pdf"):
+                    pdf_count += 1
+                elif name.endswith(".docx"):
+                    docx_count += 1
+    if pdf_count + docx_count == 0:
+        logger.warning(f"No PDF or DOCX documents found under {Config.DOCUMENTS_DIR}")
+        logger.warning("Please add past performance documents (PDF/DOCX) to this directory tree")
         return
     
     # Initialize RAG analyzer based on the provider from config
@@ -325,7 +298,31 @@ def main():
                 vector_store_path=Config.VECTOR_STORE_PATH
             )
         else:
-            raise ValueError("Invalid LLM_PROVIDER configured. Choose 'openai' or 'ollama'.")
+            # Azure OpenAI / Azure Foundry provider
+            if Config.LLM_PROVIDER == "azure":
+                logger.info("Initializing Azure OpenAI provider")
+                azure_api_key = Config.AZURE_OPENAI_API_KEY
+                if not azure_api_key:
+                    logger.error("AZURE_OPENAI_API_KEY is not set for Azure provider!")
+                    return
+
+                analyzer = RAGCapabilityAnalyzer(
+                    provider="azure",
+                    model_name=Config.AZURE_OPENAI_DEPLOYMENT_NAME or Config.MODEL_NAME,
+                    azure_endpoint=Config.AZURE_OPENAI_ENDPOINT,
+                    azure_api_key=azure_api_key,
+                    azure_api_version=Config.AZURE_OPENAI_API_VERSION,
+                    azure_deployment=Config.AZURE_OPENAI_DEPLOYMENT_NAME,
+                    azure_embedding_deployment=Config.AZURE_OPENAI_EMBEDDING_DEPLOYMENT_NAME,
+                    use_local_embeddings=Config.USE_LOCAL_EMBEDDINGS,
+                    local_embedding_model=Config.LOCAL_EMBEDDING_MODEL_NAME,
+                    chunk_size=Config.CHUNK_SIZE,
+                    chunk_overlap=Config.CHUNK_OVERLAP,
+                    top_k_retrieval=Config.TOP_K_RETRIEVAL,
+                    vector_store_path=Config.VECTOR_STORE_PATH
+                )
+            else:
+                raise ValueError("Invalid LLM_PROVIDER configured. Choose 'openai', 'ollama', or 'azure'.")
         
         # Process documents and create vector store
         logger.info("Processing past performance documents...")
@@ -445,21 +442,16 @@ def main():
         # Save to Excel using the new function with template and styling
         save_results_to_excel(result_df, TEMPLATE_EXCEL_PATH, excel_output)
 
-        # Generate the comprehensive executive capability report
-        report_path = generate_capability_report(analyzer, results, os.path.join(os.path.dirname(OUTPUT_EXCEL), "capability_report.txt"))
-        
-        # Provide summary of outputs
+        # Provide summary of outputs (capability matrix only)
         logger.info("="*60)
         logger.info("ANALYSIS COMPLETED SUCCESSFULLY")
         logger.info("="*60)
-        logger.info(f"📊 Excel Results: {excel_output}")
+        logger.info(f"📊 Capability Matrix (Excel): {excel_output}")
         logger.info(f"📋 JSON Data: {output_file}")
-        logger.info(f"📄 Executive Report: {report_path}")
         logger.info("="*60)
         logger.info("💡 NEXT STEPS:")
-        logger.info("1. Review the Executive Report first for strategic insights")
-        logger.info("2. Use the Excel file for detailed requirement-by-requirement analysis")
-        logger.info("3. Reference the JSON file for programmatic access to results")
+        logger.info("1. Use the Excel file for requirement-by-requirement analysis and ratings")
+        logger.info("2. Reference the JSON file for programmatic access to results")
         logger.info("="*60)
 
         # If process completed successfully in prod mode, remove checkpoint

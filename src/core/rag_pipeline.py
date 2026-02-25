@@ -20,16 +20,30 @@ import pandas as pd
 import numpy as np
 from tqdm import tqdm
 
-# LangChain imports
+# LangChain imports (support both legacy and 0.3+ layouts)
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain_openai import OpenAIEmbeddings, ChatOpenAI
+from langchain_openai import (
+    OpenAIEmbeddings,
+    ChatOpenAI,
+    AzureChatOpenAI,
+    AzureOpenAIEmbeddings,
+)
 from langchain_community.vectorstores import Chroma
-from langchain_community.embeddings import OllamaEmbeddings
+from langchain_community.embeddings import OllamaEmbeddings, HuggingFaceEmbeddings
 from langchain_community.chat_models import ChatOllama
-from langchain.schema import Document
-from langchain.prompts import ChatPromptTemplate
-from langchain.schema.runnable import RunnablePassthrough
-from langchain.output_parsers import PydanticOutputParser, OutputFixingParser
+
+try:
+    # Preferred: LangChain 0.3+ core packages
+    from langchain_core.documents import Document
+    from langchain_core.prompts import ChatPromptTemplate
+    from langchain_core.runnables import RunnablePassthrough
+    from langchain_core.output_parsers import PydanticOutputParser
+except ImportError:
+    # Fallback for older LangChain versions
+    from langchain.schema import Document
+    from langchain.prompts import ChatPromptTemplate
+    from langchain.schema.runnable import RunnablePassthrough
+    from langchain.output_parsers import PydanticOutputParser
 from pydantic import BaseModel, Field
 
 # Configure logging
@@ -52,14 +66,28 @@ class CapabilityMatch:
 
 class Evidence(BaseModel):
     """A structured representation of a single piece of evidence."""
-    source: str = Field(description="The filename of the source document from which this evidence was extracted.")
+    source: str = Field(
+        description=(
+            "The contract name and filename of the source document from which this evidence was extracted "
+            "(for example: 'TSA IPMSS BPA / PP_TSA_update')."
+        )
+    )
     text: str = Field(description="The specific quote or piece of evidence from the past performance document.")
 
 class CapabilityAnalysis(BaseModel):
     """Structured output for capability analysis."""
     confidence_score: float = Field(description="Confidence score from 0.0 to 1.0 indicating our capability to handle this requirement.")
-    supporting_evidence: List[Evidence] = Field(description="A list of evidence items, each with its corresponding source document.")
-    reasoning: str = Field(description="Detailed reasoning for the confidence score based on a gap analysis of the requirement versus the evidence.")
+    supporting_evidence: List[Evidence] = Field(description="A list of evidence items, each with its corresponding source (contract name / filename).")
+    reasoning: str = Field(
+        description=(
+            "Reasoning written in a specific format: one block per contract that had relevant evidence. "
+            "Each block must start with the CONTRACT FOLDER NAME followed by a colon, then a paragraph in first-person 'We' style "
+            "describing our capability based on that contract's evidence. Use professional tone; reference specific deliverables, "
+            "reports, processes, or manuals. Separate multiple contract blocks with a blank line. "
+            "Example format: 'SSOE: We maintain updated project documents, submit Monthly Status Reports... "
+            "CDAC: The CDAC Contractor requests, receives, screens...' Only include contracts that appear in the provided context (top matches)."
+        )
+    )
 
 class RAGCapabilityAnalyzerTXT:
     """
@@ -71,6 +99,13 @@ class RAGCapabilityAnalyzerTXT:
                  openai_api_key: Optional[str] = None,
                  model_name: str = "gpt-4o",
                  ollama_base_url: str = "http://localhost:11434",
+                 azure_endpoint: Optional[str] = None,
+                 azure_api_key: Optional[str] = None,
+                 azure_api_version: str = "2024-12-01-preview",
+                 azure_deployment: Optional[str] = None,
+                 azure_embedding_deployment: Optional[str] = None,
+                 use_local_embeddings: bool = False,
+                 local_embedding_model: str = "sentence-transformers/all-MiniLM-L6-v2",
                  chunk_size: int = 1000,
                  chunk_overlap: int = 200,
                  top_k_retrieval: int = 5,
@@ -97,8 +132,41 @@ class RAGCapabilityAnalyzerTXT:
                 os.environ["OPENAI_API_KEY"] = openai_api_key
             self.llm = ChatOpenAI(model_name=model_name, temperature=0.0)
             self.embeddings = OpenAIEmbeddings()
+        elif self.provider == "azure":
+            logger.info(
+                f"Using Azure OpenAI provider with deployment '{azure_deployment or model_name}' "
+                f"at endpoint '{azure_endpoint}' (local_embeddings={use_local_embeddings})"
+            )
+            if azure_api_key:
+                # Allow downstream clients relying on env var, while also passing explicit params
+                os.environ["AZURE_OPENAI_API_KEY"] = azure_api_key
+
+            # Initialize chat model
+            self.llm = AzureChatOpenAI(
+                azure_endpoint=azure_endpoint,
+                api_key=azure_api_key,
+                api_version=azure_api_version,
+                azure_deployment=azure_deployment or model_name,
+                temperature=0.0,
+            )
+
+            # Initialize embeddings: either local (sentence-transformers) or Azure embeddings
+            if use_local_embeddings:
+                logger.info(f"Using local HuggingFace embeddings: {local_embedding_model}")
+                self.embeddings = HuggingFaceEmbeddings(model_name=local_embedding_model)
+            else:
+                logger.info(
+                    f"Using Azure OpenAI embeddings with deployment "
+                    f"'{azure_embedding_deployment or azure_deployment}'"
+                )
+                self.embeddings = AzureOpenAIEmbeddings(
+                    azure_endpoint=azure_endpoint,
+                    api_key=azure_api_key,
+                    api_version=azure_api_version,
+                    model=azure_embedding_deployment or (azure_deployment or model_name),
+                )
         else:
-            raise ValueError("Unsupported LLM provider. Choose 'openai' or 'ollama'.")
+            raise ValueError("Unsupported LLM provider. Choose 'openai', 'ollama', or 'azure'.")
         
         # Initialize text splitter
         self.text_splitter = RecursiveCharacterTextSplitter(
@@ -112,9 +180,8 @@ class RAGCapabilityAnalyzerTXT:
         self.vector_store = None
         self.documents_processed = set()
         
-        # Initialize output parser
-        base_parser = PydanticOutputParser(pydantic_object=CapabilityAnalysis)
-        self.output_parser = OutputFixingParser.from_llm(parser=base_parser, llm=self.llm)
+        # Initialize output parser (structured Pydantic output)
+        self.output_parser = PydanticOutputParser(pydantic_object=CapabilityAnalysis)
         
         # Create the analysis prompt
         self.analysis_prompt = self._create_analysis_prompt()
@@ -159,6 +226,48 @@ class RAGCapabilityAnalyzerTXT:
         except Exception as e:
             logger.error(f"Error reading TXT file {txt_path}: {e}")
             return ""
+
+    def _infer_contract_name_from_source_path(self, source_path: Path) -> Optional[str]:
+        """
+        Infer contract folder name from an absolute source path.
+
+        Expected layout:
+        .../02_Detailed Project Descriptions/<CONTRACT_FOLDER>/...
+        """
+        parts = source_path.parts
+        try:
+            idx = parts.index("02_Detailed Project Descriptions")
+            if idx + 1 < len(parts):
+                return parts[idx + 1]
+        except ValueError:
+            pass
+        return source_path.parent.name if source_path.parent else None
+
+    def _extract_source_metadata_from_txt_header(self, txt_path: Path) -> Tuple[Optional[str], Optional[str]]:
+        """
+        Extract (original_source_path, contract_name) from the TXT metadata header.
+
+        Supports headers produced by the converter:
+        - '# Original PDF: ...'
+        - '# Original DOCX: ...'
+        """
+        original_source: Optional[str] = None
+        contract_name: Optional[str] = None
+
+        try:
+            with open(txt_path, "r", encoding="utf-8") as f:
+                for line in f:
+                    if not line.startswith("#"):
+                        break
+                    if line.startswith("# Original PDF:") or line.startswith("# Original DOCX:"):
+                        original_source = line.split(":", 1)[1].strip()
+                        src_path = Path(original_source)
+                        contract_name = self._infer_contract_name_from_source_path(src_path)
+                        break
+        except Exception as header_err:
+            logger.debug(f"Could not parse header for {txt_path}: {header_err}")
+
+        return original_source, contract_name
     
     def process_txt_documents(self) -> None:
         """
@@ -187,6 +296,8 @@ class RAGCapabilityAnalyzerTXT:
         documents = []
         for txt_path in tqdm(txt_files, desc="Processing TXT files"):
             try:
+                original_source, contract_name = self._extract_source_metadata_from_txt_header(txt_path)
+
                 text_content = self.read_txt_file(txt_path)
                 if text_content:
                     # Split text into chunks
@@ -199,10 +310,11 @@ class RAGCapabilityAnalyzerTXT:
                             metadata={
                                 "source": str(txt_path),
                                 "filename": txt_path.stem,  # Remove .txt extension
-                                "original_pdf": f"{txt_path.stem}.pdf",  # Reference to original PDF
+                                "original_source": original_source,
+                                "contract_name": contract_name,
                                 "chunk_id": i,
-                                "total_chunks": len(chunks)
-                            }
+                                "total_chunks": len(chunks),
+                            },
                         )
                         documents.append(doc)
                     
@@ -302,11 +414,20 @@ class RAGCapabilityAnalyzerTXT:
         
         # Invoke the chain with the requirement and context
         try:
-            analysis_result = chain.invoke({
-                "requirement": requirement,
-                "context": context,
-                "format_instructions": self.output_parser.parser.get_format_instructions()
-            })
+            # Get format instructions in a version-compatible way
+            if hasattr(self.output_parser, "get_format_instructions"):
+                fmt_instructions = self.output_parser.get_format_instructions()
+            else:
+                # Legacy interface (if any)
+                fmt_instructions = self.output_parser.parser.get_format_instructions()  # type: ignore[attr-defined]
+
+            analysis_result = chain.invoke(
+                {
+                    "requirement": requirement,
+                    "context": context,
+                    "format_instructions": fmt_instructions,
+                }
+            )
             
             # Create a CapabilityMatch object from the result
             return CapabilityMatch(
@@ -320,7 +441,11 @@ class RAGCapabilityAnalyzerTXT:
             )
             
         except Exception as e:
-            logger.error(f"Error in capability analysis: {e}")
+            # Avoid dumping full JSON bodies into logs; keep the message concise
+            msg = str(e)
+            if "Invalid json output:" in msg:
+                msg = "Invalid JSON output from LLM (see debug logs for details)"
+            logger.error(f"Error in capability analysis: {msg}")
             # Return a fallback result
             return CapabilityMatch(
                 sentence=requirement,
@@ -333,7 +458,13 @@ class RAGCapabilityAnalyzerTXT:
         """Prepare context from retrieved documents."""
         context_parts = []
         for i, doc in enumerate(retrieved_docs, 1):
-            context_parts.append(f"Document {i} ({doc.metadata.get('filename', 'Unknown')}):\n{doc.page_content}")
+            filename = doc.metadata.get("filename", "Unknown")
+            contract_name = doc.metadata.get("contract_name")
+            if contract_name:
+                header = f"Document {i} (Contract: {contract_name} | File: {filename})"
+            else:
+                header = f"Document {i} ({filename})"
+            context_parts.append(f"{header}:\n{doc.page_content}")
         
         return "\n\n".join(context_parts)
     
@@ -345,24 +476,29 @@ You are an expert capability analyst evaluating past performance documents again
 REQUIREMENT TO ANALYZE:
 {requirement}
 
-CONTEXT FROM PAST PERFORMANCE DOCUMENTS:
+CONTEXT FROM PAST PERFORMANCE DOCUMENTS (each chunk is labeled with Contract and File):
 {context}
 
 TASK:
-Analyze the above requirement against the provided context from past performance documents. Determine our capability to fulfill this requirement based on the evidence.
+Analyze the requirement against the context above. Determine our capability to fulfill it. Use only the contracts and evidence provided (these are the top matches). Output your reasoning in the exact format below.
 
-EVALUATION CRITERIA:
-1. **Relevance**: How closely does the past performance align with the requirement?
-2. **Specificity**: Are there specific examples, metrics, or detailed descriptions?
-3. **Recency**: How recent is the relevant experience?
-4. **Scale**: Does the past performance demonstrate appropriate scale and complexity?
+REASONING OUTPUT FORMAT (mandatory):
+- Group your reasoning **by contract**. For each contract that has relevant evidence in the context, write exactly one block.
+- Each block must start with the **contract folder name** (as shown in the context, e.g. "Contract: TSA IPMSS BPA") followed by a colon, then a single paragraph.
+- Paragraph style: first-person "We", professional and confident. Describe what we do, what we deliver, and how we meet the requirement. Reference specific deliverables (e.g. reports, manuals, processes, approvals) from the evidence.
+- If multiple contracts have relevant evidence, include one block per contract, separated by a blank line. Only include contracts that appear in the context (top matches).
+- Do NOT write the words "Contract:" or "File:" in your reasoning. Instead, just use the contract folder name as the block header (for example: "CMS CSMM (RMADA2): ...").
 
-INSTRUCTIONS:
-- Provide a confidence score from 0.0 to 1.0
-- Include specific quotes from the context as supporting evidence
-- Provide detailed reasoning for your assessment
-- Focus on concrete examples and measurable outcomes
-- Be conservative in your assessment - only give high scores for strong, direct matches
+Example of the required reasoning style:
+
+SSOE: We maintain updated project documents, submit Monthly Status Reports of tasks and activities, and provide a detailed Annual Summary Report with findings and recommendations. Monthly reports to the COR include trends and methodologies on appeals upheld at any level. We maintain updated project documents and conduct analytic review and validation processes in accordance with the CMS Program Integrity Manual (PIM).
+
+CDAC: The CDAC Contractor requests, receives, screens, troubleshoots, abstracts and validates, processes, stores, and destroys/mails medical records. Each clinical data abstraction is based on documentation. We participate in an external quality assurance (EQA) program, adhere to Internal Quality Control (IQC) review, and provide questions and improvement suggestions to CMS or study owners as authorized. Each abstraction type includes job aids and/or manuals to assist abstractors in performing accurately.
+
+OTHER INSTRUCTIONS:
+- Provide a confidence score from 0.0 to 1.0 (conservative: high scores only for strong, direct matches).
+- In supporting_evidence, list specific quotes and set source to the contract name and filename (e.g. "TSA IPMSS BPA / PP_TSA_update").
+- Base reasoning only on the top-matched context provided; do not invent contracts or evidence.
 
 {format_instructions}
 """)
@@ -373,17 +509,30 @@ INSTRUCTIONS:
         return [self.analyze_capability(req) for req in requirements]
     
     def format_past_performance(self, capability_match: CapabilityMatch) -> str:
-        """Format the capability match for output."""
-        evidence_text = "\n".join([
-            f"- {evidence.text} (from: {evidence.source})"
-            for evidence in capability_match.supporting_evidence
-        ])
-        
-        return f"""Confidence: {capability_match.confidence_score:.2f}
-Reasoning: {capability_match.reasoning}
+        """Format the capability match for output, including grouped evidence."""
+        # Group evidence by contract (parsed from the source prefix before ' / ')
+        grouped: Dict[str, List[EvidenceItem]] = defaultdict(list)
+        for ev in capability_match.supporting_evidence:
+            src = ev.source or ""
+            contract_name = src.split(" / ", 1)[0].strip() if " / " in src else src.strip() or "Unknown Contract"
+            grouped[contract_name].append(ev)
 
-Supporting Evidence:
+        evidence_lines: List[str] = []
+        for contract, items in grouped.items():
+            evidence_lines.append(f"{contract}:")
+            for ev in items:
+                snippet = ev.text.strip()
+                evidence_lines.append(f'  - "{snippet}" ({ev.source})')
+
+        evidence_text = "\n".join(evidence_lines) if evidence_lines else ""
+
+        if evidence_text:
+            return f"""{capability_match.reasoning}
+
+Supporting Evidence (by contract):
 {evidence_text}"""
+        else:
+            return capability_match.reasoning
 
     def generate_summary_report(self, analysis_results: List[Dict[str, Any]]) -> str:
         """Generate a comprehensive summary report."""
